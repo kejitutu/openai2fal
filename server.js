@@ -1,17 +1,24 @@
 import express from 'express';
 import { fal } from '@fal-ai/client';
 
-// 从环境变量读取 Fal AI API Key
-const FAL_KEY = process.env.FAL_KEY;
-if (!FAL_KEY) {
-    console.error("Error: FAL_KEY environment variable is not set.");
+// === 新增：读取并处理多个FAL_KEY及自定义鉴权秘钥 ===
+const FAL_KEYS = process.env.FAL_KEY ? process.env.FAL_KEY.split(',').map(key => key.trim()).filter(Boolean) : [];
+const AUTH_SECRET = process.env.AUTH_SECRET;
+
+if (FAL_KEYS.length === 0) {
+    console.error("Error: FAL_KEY environment variable is not set or contains no valid keys.");
     process.exit(1);
 }
 
-// 配置 fal 客户端
-fal.config({
-    credentials: FAL_KEY,
-});
+if (!AUTH_SECRET) {
+    console.error("Error: AUTH_SECRET environment variable is not set. This is required for authentication.");
+    process.exit(1);
+}
+
+// 新增：随机选择一个FAL_KEY
+function getRandomFalKey() {
+    return FAL_KEYS[Math.floor(Math.random() * FAL_KEYS.length)];
+}
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -45,6 +52,19 @@ const FAL_SUPPORTED_MODELS = [
     "meta-llama/llama-4-scout"
 ];
 
+// === 新增：鉴权中间件 ===
+const authenticateRequest = (req, res, next) => {
+    // 从请求头或查询参数中获取认证密钥
+    const authKey = req.headers['x-auth-secret'] || req.query.auth_secret;
+    
+    if (!authKey || authKey !== AUTH_SECRET) {
+        console.warn("Authentication failed: Invalid or missing auth secret");
+        return res.status(401).json({ error: 'Unauthorized. Valid authentication required.' });
+    }
+    
+    next();
+};
+
 // Helper function to get owner from model ID
 const getOwner = (modelId) => {
     if (modelId && modelId.includes('/')) {
@@ -52,6 +72,9 @@ const getOwner = (modelId) => {
     }
     return 'fal-ai';
 }
+
+// 应用鉴权中间件到所有API路由
+app.use('/v1', authenticateRequest);
 
 // GET /v1/models endpoint
 app.get('/v1/models', (req, res) => {
@@ -202,7 +225,7 @@ function convertMessagesToFalPrompt(messages) {
 // === convertMessagesToFalPrompt 函数结束 ===
 
 
-// POST /v1/chat/completions endpoint (保持不变)
+// POST /v1/chat/completions endpoint (添加了随机选择FAL_KEY的功能)
 app.post('/v1/chat/completions', async (req, res) => {
     const { model, messages, stream = false, reasoning = false, ...restOpenAIParams } = req.body;
 
@@ -217,6 +240,14 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     try {
+        // === 新增：随机选择一个FAL_KEY并配置 ===
+        const selectedKey = getRandomFalKey();
+        // 重新配置fal客户端使用随机选择的密钥
+        fal.config({
+            credentials: selectedKey,
+        });
+        console.log(`Using randomly selected FAL key: ${selectedKey.substring(0, 5)}...`);
+
         // *** 使用更新后的转换函数 ***
         const { prompt, system_prompt } = convertMessagesToFalPrompt(messages);
 
@@ -226,7 +257,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             ...(system_prompt && { system_prompt: system_prompt }),
             reasoning: !!reasoning,
         };
-	console.log("Fal Input:", JSON.stringify(falInput, null, 2));
+        console.log("Fal Input:", JSON.stringify(falInput, null, 2));
         console.log("Forwarding request to fal-ai with system-priority + separator + recency input:");
         console.log("System Prompt Length:", system_prompt?.length || 0);
         console.log("Prompt Length:", prompt?.length || 0);
@@ -329,13 +360,26 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 });
 
+// === 新增：添加CORS支持和OPTIONS请求处理 ===
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Secret');
+    
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
 // 启动服务器 (更新启动信息)
 app.listen(PORT, () => {
     console.log(`===================================================`);
-    console.log(` Fal OpenAI Proxy Server (System Top + Separator + Recency)`); // 更新策略名称
+    console.log(` Fal OpenAI Proxy Server (System Top + Separator + Recency)`); 
     console.log(` Listening on port: ${PORT}`);
     console.log(` Using Limits: System Prompt=${SYSTEM_PROMPT_LIMIT}, Prompt=${PROMPT_LIMIT}`);
-    console.log(` Fal AI Key Loaded: ${FAL_KEY ? 'Yes' : 'No'}`);
+    console.log(` Fal AI Keys Loaded: ${FAL_KEYS.length}`);
+    console.log(` Authentication Required: Yes (via AUTH_SECRET)`);
     console.log(` Chat Completions Endpoint: POST http://localhost:${PORT}/v1/chat/completions`);
     console.log(` Models Endpoint: GET http://localhost:${PORT}/v1/models`);
     console.log(`===================================================`);
@@ -343,5 +387,5 @@ app.listen(PORT, () => {
 
 // 根路径响应 (更新信息)
 app.get('/', (req, res) => {
-    res.send('Fal OpenAI Proxy (System Top + Separator + Recency Strategy) is running.');
+    res.send('Fal OpenAI Proxy (System Top + Separator + Recency Strategy) is running. Authentication required for API access.');
 });
