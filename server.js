@@ -3,7 +3,7 @@ import { fal } from '@fal-ai/client';
 
 // === 新增：读取并处理多个FAL_KEY及自定义鉴权秘钥 ===
 const FAL_KEYS = process.env.FAL_KEY ? process.env.FAL_KEY.split(',').map(key => key.trim()).filter(Boolean) : [];
-const AUTH_SECRET = process.env.AUTH_SECRET;
+const AUTH_SECRET = process.env.AUTH_SECRET || sk-999999;
 
 if (FAL_KEYS.length === 0) {
     console.error("Error: FAL_KEY environment variable is not set or contains no valid keys.");
