@@ -3,7 +3,7 @@ import { fal } from '@fal-ai/client';
 
 // === 新增：读取并处理多个FAL_KEY及自定义鉴权秘钥 ===
 const FAL_KEYS = process.env.FAL_KEY ? process.env.FAL_KEY.split(',').map(key => key.trim()).filter(Boolean) : [];
-const AUTH_SECRET = process.env.AUTH_SECRET || sk-999999;
+const AUTH_SECRET = process.env.AUTH_SECRET;
 
 if (FAL_KEYS.length === 0) {
     console.error("Error: FAL_KEY environment variable is not set or contains no valid keys.");
@@ -52,14 +52,26 @@ const FAL_SUPPORTED_MODELS = [
     "meta-llama/llama-4-scout"
 ];
 
-// === 新增：鉴权中间件 ===
+// === 修改：鉴权中间件使用Bearer认证 ===
 const authenticateRequest = (req, res, next) => {
-    // 从请求头或查询参数中获取认证密钥
-    const authKey = req.headers['x-auth-secret'] || req.query.auth_secret;
+    // 从Authorization头部中获取Bearer token
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.startsWith('Bearer ') 
+        ? authHeader.substring(7) // 移除"Bearer "前缀
+        : null;
     
-    if (!authKey || authKey !== AUTH_SECRET) {
-        console.warn("Authentication failed: Invalid or missing auth secret");
-        return res.status(401).json({ error: 'Unauthorized. Valid authentication required.' });
+    // 仍然支持查询参数认证作为备选
+    const queryToken = req.query.auth_secret;
+    
+    // 使用Authorization头部或查询参数中的token
+    const authToken = token || queryToken;
+    
+    if (!authToken || authToken !== AUTH_SECRET) {
+        console.warn("Authentication failed: Invalid or missing Bearer token");
+        return res.status(401).json({ 
+            error: 'Unauthorized',
+            message: 'Authentication required. Use Authorization: Bearer <token>' 
+        });
     }
     
     next();
@@ -364,7 +376,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Secret');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     
     if (req.method === 'OPTIONS') {
         return res.sendStatus(200);
@@ -379,7 +391,7 @@ app.listen(PORT, () => {
     console.log(` Listening on port: ${PORT}`);
     console.log(` Using Limits: System Prompt=${SYSTEM_PROMPT_LIMIT}, Prompt=${PROMPT_LIMIT}`);
     console.log(` Fal AI Keys Loaded: ${FAL_KEYS.length}`);
-    console.log(` Authentication Required: Yes (via AUTH_SECRET)`);
+    console.log(` Authentication Required: Yes (via Bearer Token)`);
     console.log(` Chat Completions Endpoint: POST http://localhost:${PORT}/v1/chat/completions`);
     console.log(` Models Endpoint: GET http://localhost:${PORT}/v1/models`);
     console.log(`===================================================`);
@@ -387,5 +399,5 @@ app.listen(PORT, () => {
 
 // 根路径响应 (更新信息)
 app.get('/', (req, res) => {
-    res.send('Fal OpenAI Proxy (System Top + Separator + Recency Strategy) is running. Authentication required for API access.');
+    res.send('Fal OpenAI Proxy (System Top + Separator + Recency Strategy) is running. Authentication required using Bearer token.');
 });
