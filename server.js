@@ -236,8 +236,46 @@ function convertMessagesToFalPrompt(messages) {
 }
 // === convertMessagesToFalPrompt 函数结束 ===
 
+// ======= 新增：处理流式响应并收集完整输出的函数 =======
+async function collectStreamedResponse(falStream) {
+    let completeOutput = '';
+    let lastEventData = null;
+    let reasoningOutput = null;
 
-// POST /v1/chat/completions endpoint (添加了随机选择FAL_KEY的功能)
+    try {
+        for await (const event of falStream) {
+            // 保存最后一个事件的数据
+            lastEventData = event;
+            
+            // 如果存在output，累积到completeOutput
+            if (event && typeof event.output === 'string') {
+                completeOutput = event.output; // 直接使用完整输出，因为fal总是发送累积结果
+            }
+            
+            // 如果有reasoning字段，保存
+            if (event && event.reasoning) {
+                reasoningOutput = event.reasoning;
+            }
+            
+            // 检查是否完成 (partial=false表示完成)
+            if (event && event.partial === false) {
+                break;
+            }
+        }
+        
+        return {
+            output: completeOutput,
+            requestId: lastEventData?.request_id || `manual-${Date.now()}`,
+            reasoning: reasoningOutput
+        };
+    } catch (error) {
+        console.error('Error collecting streamed response:', error);
+        throw error;
+    }
+}
+// ======= 收集函数结束 =======
+
+// POST /v1/chat/completions endpoint (修改了非流式处理逻辑)
 app.post('/v1/chat/completions', async (req, res) => {
     const { model, messages, stream = false, reasoning = false, ...restOpenAIParams } = req.body;
 
@@ -282,9 +320,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         console.log("--- Prompt End ---");
 
 
-        // --- 流式/非流式处理逻辑 (保持不变) ---
+        // --- 流式/非流式处理逻辑 ---
         if (stream) {
-            // ... 流式代码 ...
+            // === 流式处理逻辑（保持不变） ===
             res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
             res.setHeader('Cache-Control', 'no-cache');
             res.setHeader('Connection', 'keep-alive');
@@ -340,24 +378,52 @@ app.post('/v1/chat/completions', async (req, res) => {
                 }
             }
         } else {
-            // --- 非流式处理 (保持不变) ---
-            console.log("Executing non-stream request...");
-            const result = await fal.subscribe("fal-ai/any-llm", { input: falInput, logs: true });
-            console.log("Received non-stream result from fal-ai:", JSON.stringify(result, null, 2));
+            // === 修改后的非流式处理逻辑（使用流式API并收集结果） ===
+            console.log("Executing non-stream request through stream API with collection...");
+            
+            try {
+                // 获取流式响应并收集完整输出
+                const falStream = await fal.stream("fal-ai/any-llm", { input: falInput });
+                const collectedResult = await collectStreamedResponse(falStream);
+                
+                console.log("Collected complete non-stream result:", JSON.stringify({
+                    output_length: collectedResult.output?.length,
+                    requestId: collectedResult.requestId,
+                    has_reasoning: !!collectedResult.reasoning
+                }));
 
-            if (result && result.error) {
-                 console.error("Fal-ai returned an error in non-stream mode:", result.error);
-                 return res.status(500).json({ object: "error", message: `Fal-ai error: ${JSON.stringify(result.error)}`, type: "fal_ai_error", param: null, code: null });
+                // 构造OpenAI格式的响应
+                const openAIResponse = {
+                    id: `chatcmpl-${collectedResult.requestId || Date.now()}`, 
+                    object: "chat.completion", 
+                    created: Math.floor(Date.now() / 1000), 
+                    model: model,
+                    choices: [{ 
+                        index: 0, 
+                        message: { 
+                            role: "assistant", 
+                            content: collectedResult.output || "" 
+                        }, 
+                        finish_reason: "stop" 
+                    }],
+                    usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null }, 
+                    system_fingerprint: null,
+                    ...(collectedResult.reasoning && { fal_reasoning: collectedResult.reasoning }),
+                };
+                
+                res.json(openAIResponse);
+                console.log("Returned collected non-stream response.");
+            } catch (error) {
+                console.error('Error in non-stream mode using stream collection:', error);
+                const errorMessage = (error instanceof Error) ? error.message : JSON.stringify(error);
+                res.status(500).json({ 
+                    object: "error", 
+                    message: `Error collecting non-stream response: ${errorMessage}`, 
+                    type: "proxy_error", 
+                    param: null, 
+                    code: null 
+                });
             }
-
-            const openAIResponse = {
-                id: `chatcmpl-${result.requestId || Date.now()}`, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: model,
-                choices: [{ index: 0, message: { role: "assistant", content: result.output || "" }, finish_reason: "stop" }],
-                usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null }, system_fingerprint: null,
-                ...(result.reasoning && { fal_reasoning: result.reasoning }),
-            };
-            res.json(openAIResponse);
-            console.log("Returned non-stream response.");
         }
 
     } catch (error) {
